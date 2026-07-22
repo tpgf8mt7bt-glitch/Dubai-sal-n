@@ -92,7 +92,7 @@ function ClientForm({client,onChange}){
 }
 
 // ─── HISTORIAL ESTÉTICO ────────────────────────────────────────────────────────
-function HistoryPanel({client,onChange,services}){
+function HistoryPanel({client,onChange,services,onGoToCobros}){
   const [showForm,setShowForm]=useState(false);
   const [editingId,setEditingId]=useState(null);
   const emptyEntry=()=>({date:new Date().toISOString().slice(0,10),serviceId:"",customService:"",price:"",notes:"",professional:""});
@@ -111,6 +111,8 @@ function HistoryPanel({client,onChange,services}){
     const newHistory=editingId?history.map(h=>h.id===editingId?newEntry:h):[newEntry,...history];
     onChange({...client,history:newHistory,updatedAt:new Date().toISOString()});
     cancel();
+    // Si es entrada nueva (no edición), redirigir a cobros
+    if(!editingId&&onGoToCobros) onGoToCobros();
   };
   const del=id=>setConfirmDel({msg:"¿Eliminar esta entrada del historial?",onOk:()=>{setConfirmDel(null);onChange({...client,history:history.filter(h=>h.id!==id),updatedAt:new Date().toISOString()});}});
 
@@ -687,56 +689,244 @@ function StatsView({clients}){
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function DashboardView({clients,onSelectClient,onNavigate}){
+function DashboardView({clients,onSelectClient,onNavigate,services,onNewClient}){
   const today=new Date().toISOString().slice(0,10);
   const [appointments,setAppointments]=useState([]);
-  useEffect(()=>{(async()=>{try{const r=await sGet("dubai_agenda:main");if(r?.value)setAppointments(JSON.parse(r.value));}catch{}})();},[]);
+  const [loading,setLoading]=useState(true);
+  const [viewDate,setViewDate]=useState(today.slice(0,7));
+  const [selectedDay,setSelectedDay]=useState(today);
+  const [showForm,setShowForm]=useState(false);
+  const [editingId,setEditingId]=useState(null);
+  const emptyForm=()=>({date:selectedDay,time:"10:00",duration:60,clientId:"",clientMode:"existing",newFirstName:"",newLastName:"",newPhone:"",serviceId:"",customService:"",notes:""});
+  const [form,setForm]=useState(emptyForm());
 
-  const todayAppts=appointments.filter(a=>a.date===today).sort((a,b)=>a.time.localeCompare(b.time));
+  useEffect(()=>{
+    (async()=>{
+      setLoading(true);
+      try{const r=await sGet("dubai_agenda:main");if(r?.value)setAppointments(JSON.parse(r.value));}
+      catch{}finally{setLoading(false);}
+    })();
+  },[]);
+
+  const saveAppts=async list=>{setAppointments(list);await sSet("dubai_agenda:main",list);};
+  const toggleAttendance=async(id,status)=>{const up=appointments.map(a=>a.id===id?{...a,attendance:a.attendance===status?null:status}:a);await saveAppts(up);};
+
   const getMonday=d=>{const dt=new Date(d+"T12:00:00");const diff=dt.getDate()-(dt.getDay()===0?6:dt.getDay()-1);return new Date(dt.setDate(diff)).toISOString().slice(0,10);};
   const getSunday=d=>{const dt=new Date(d+"T12:00:00");const diff=dt.getDate()+(dt.getDay()===0?0:7-dt.getDay());return new Date(dt.setDate(diff)).toISOString().slice(0,10);};
   const weekCount=appointments.filter(a=>a.date>=getMonday(today)&&a.date<=getSunday(today)).length;
+
+  const [year,month]=viewDate.split("-").map(Number);
+  const firstDay=new Date(year,month-1,1).getDay();
+  const daysInMonth=new Date(year,month,0).getDate();
+  const prevM=()=>{const d=new Date(year,month-2,1);setViewDate(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`);};
+  const nextM=()=>{const d=new Date(year,month,1);setViewDate(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`);};
+  const monthNames=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+  const dayNames=["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+  const apptsByDay={};
+  appointments.forEach(a=>{if(!apptsByDay[a.date])apptsByDay[a.date]=[];apptsByDay[a.date].push(a);});
+  const dayAppts=(apptsByDay[selectedDay]||[]).sort((a,b)=>a.time.localeCompare(b.time));
+
   const getClientName=id=>{const c=clients.find(x=>x.id===id);return c?`${c.firstName||""} ${c.lastName||""}`.trim()||"Sin nombre":"Cliente";};
   const getClientPhone=id=>{const c=clients.find(x=>x.id===id);return c?.phone||"";};
   const hour=new Date().getHours();
   const greeting=hour<12?"Buenos días":hour<19?"Buenas tardes":"Buenas noches";
 
+  const openNew=()=>{setForm({...emptyForm(),date:selectedDay});setEditingId(null);setShowForm(true);};
+  const openEdit=a=>{
+    setForm({date:a.date,time:a.time,duration:a.duration||60,clientId:a.clientId||"",clientMode:"existing",
+      newFirstName:"",newLastName:"",newPhone:"",serviceId:a.serviceId||"",customService:a.customService||"",notes:a.notes||""});
+    setEditingId(a.id);setShowForm(true);
+  };
+  const delAppt=async id=>{await saveAppts(appointments.filter(a=>a.id!==id));};
+
+  const saveAppt=async()=>{
+    let clientId=form.clientId;
+    // Si es cliente nuevo, crearlo primero
+    if(form.clientMode==="new"){
+      if(!form.newFirstName.trim()&&!form.newLastName.trim()) return;
+      const nc=onNewClient({firstName:form.newFirstName.trim(),lastName:form.newLastName.trim(),phone:form.newPhone.trim()});
+      clientId=nc.id;
+    }
+    const selSvc=services.find(s=>s.id===form.serviceId);
+    const serviceName=selSvc?.name||form.customService||"";
+    let up;
+    if(editingId){
+      up=appointments.map(a=>a.id===editingId?{...a,...form,clientId,serviceId:form.serviceId,serviceName,customService:form.customService}:a)
+        .sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
+    } else {
+      const na={id:Date.now().toString(),date:form.date,time:form.time,duration:parseInt(form.duration)||60,
+        clientId,serviceId:form.serviceId,serviceName,customService:form.customService,notes:form.notes,
+        createdAt:new Date().toISOString()};
+      up=[...appointments,na].sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
+    }
+    await saveAppts(up);setShowForm(false);setEditingId(null);
+  };
+
   return(
     <div style={{padding:20,maxWidth:760,margin:"0 auto"}}>
-      <div style={{marginBottom:20,padding:"20px 24px",background:"linear-gradient(135deg,#1a1a1a,#b8973e)",borderRadius:16,color:"#fff"}}>
-        <div style={{fontSize:12,color:"rgba(255,255,255,0.7)",marginBottom:4}}>{greeting} ✨</div>
-        <div style={{fontSize:22,fontWeight:800}}>Dubai Salón de Belleza</div>
-        <div style={{fontSize:12,color:"rgba(255,255,255,0.7)",marginTop:4}}>{new Date().toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div>
+      {/* Header */}
+      <div style={{marginBottom:16,padding:"18px 24px",background:"linear-gradient(135deg,#1a1a1a,#b8973e)",borderRadius:16,color:"#fff"}}>
+        <div style={{fontSize:12,color:"rgba(255,255,255,0.7)",marginBottom:2}}>{greeting} ✨</div>
+        <div style={{fontSize:20,fontWeight:800}}>Dubai Salón de Belleza</div>
+        <div style={{fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:2}}>{new Date().toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long"})}</div>
       </div>
 
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:20}}>
-        {[{l:"Clientes",v:clients.length,i:"👤",c:"#b8973e",bg:"#fdf8ee"},{l:"Turnos hoy",v:todayAppts.length,i:"📅",c:"#22c55e",bg:"#f0fdf4"},{l:"Esta semana",v:weekCount,i:"📆",c:"#2563eb",bg:"#eff6ff"}].map(({l,v,i,c,bg})=>(
-          <div key={l} style={{backgroundColor:bg,borderRadius:12,padding:"14px",border:`1px solid ${c}22`,textAlign:"center"}}>
-            <div style={{fontSize:22}}>{i}</div><div style={{fontSize:24,fontWeight:800,color:c,lineHeight:1}}>{v}</div>
-            <div style={{fontSize:11,color:"#64748b",marginTop:2}}>{l}</div>
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+        {[{l:"Clientes",v:clients.length,i:"👤",c:"#b8973e",bg:"#fdf8ee"},{l:"Hoy",v:(apptsByDay[today]||[]).length,i:"📅",c:"#22c55e",bg:"#f0fdf4"},{l:"Semana",v:weekCount,i:"📆",c:"#2563eb",bg:"#eff6ff"}].map(({l,v,i,c,bg})=>(
+          <div key={l} style={{backgroundColor:bg,borderRadius:12,padding:"12px",border:`1px solid ${c}22`,textAlign:"center"}}>
+            <div style={{fontSize:20}}>{i}</div><div style={{fontSize:22,fontWeight:800,color:c,lineHeight:1}}>{v}</div>
+            <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{l}</div>
           </div>
         ))}
       </div>
 
-      <div style={{fontSize:13,fontWeight:700,color:"#1e293b",marginBottom:10}}>📅 Turnos de hoy</div>
-      {todayAppts.length===0?(<div style={{padding:16,textAlign:"center",color:"#94a3b8",backgroundColor:"#faf9f6",borderRadius:10,border:"1px dashed #e2e8f0",fontSize:13}}>Sin turnos para hoy</div>):(
-        todayAppts.map(a=>(
-          <div key={a.id} style={{backgroundColor:"#fff",borderRadius:10,padding:"12px 14px",marginBottom:8,border:"1px solid #e2e8f0",borderLeft:"4px solid #b8973e",display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
-            onClick={()=>a.clientId&&onSelectClient(a.clientId)}>
-            <div style={{backgroundColor:"#fdf8ee",borderRadius:8,padding:"8px 10px",textAlign:"center",flexShrink:0,minWidth:52}}>
-              <div style={{fontSize:15,fontWeight:800,color:"#b8973e"}}>{a.time}</div>
-              <div style={{fontSize:9,color:"#94a3b8"}}>{a.duration}min</div>
-            </div>
-            <div style={{flex:1}}>
-              <div style={{fontWeight:700,fontSize:13,color:"#1e293b"}}>{getClientName(a.clientId)}</div>
-              {a.service&&<div style={{fontSize:11,color:"#b8973e",marginTop:1,fontWeight:600}}>{a.service}</div>}
-            </div>
-            {getClientPhone(a.clientId)&&<button onClick={e=>{e.stopPropagation();window.open(buildWAReminder(getClientPhone(a.clientId),getClientName(a.clientId),a.date,a.time),"_blank");}}
-              style={{padding:"5px 8px",borderRadius:7,border:"1px solid #25d366",backgroundColor:"#f0fdf4",color:"#16a34a",fontWeight:700,fontSize:11,cursor:"pointer"}}>📱 WA</button>}
-            {a.clientId&&<div style={{color:"#94a3b8",fontSize:18}}>›</div>}
+      {/* Calendario */}
+      <div style={{backgroundColor:"#fff",borderRadius:12,border:"1px solid #e2e8f0",overflow:"hidden",marginBottom:12}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",backgroundColor:"#1a1a1a",color:"#b8973e"}}>
+          <button onClick={prevM} style={{background:"none",border:"none",color:"#b8973e",cursor:"pointer",fontSize:18}}>‹</button>
+          <span style={{fontWeight:700,fontSize:13}}>{monthNames[month-1]} {year}</span>
+          <button onClick={nextM} style={{background:"none",border:"none",color:"#b8973e",cursor:"pointer",fontSize:18}}>›</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",backgroundColor:"#f8fafc"}}>
+          {dayNames.map(d=><div key={d} style={{padding:"5px 0",textAlign:"center",fontSize:10,fontWeight:700,color:"#64748b"}}>{d}</div>)}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",padding:"4px"}}>
+          {Array.from({length:firstDay}).map((_,i)=><div key={`e${i}`}/>)}
+          {Array.from({length:daysInMonth}).map((_,i)=>{
+            const day=i+1;
+            const ds=`${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+            const has=apptsByDay[ds]?.length>0;
+            const isT=ds===today,isSel=ds===selectedDay;
+            return(<div key={day} onClick={()=>setSelectedDay(ds)}
+              style={{padding:"2px 0",textAlign:"center",cursor:"pointer",
+                backgroundColor:isSel?"#b8973e":isT?"#fdf8ee":"transparent",
+                borderRadius:"50%",margin:"1px auto",width:30,height:30,
+                display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+              <span style={{fontSize:11,fontWeight:isT||isSel?700:400,color:isSel?"#fff":isT?"#b8973e":"#1e293b"}}>{day}</span>
+              {has&&<div style={{width:3,height:3,borderRadius:"50%",backgroundColor:isSel?"#fff":"#b8973e",marginTop:1}}/>}
+            </div>);
+          })}
+        </div>
+      </div>
+
+      {/* Turnos del día + botón agendar */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#1e293b",display:"flex",alignItems:"center",gap:8}}>
+          📅 {selectedDay===today?"Hoy":`Turnos del ${selectedDay}`}
+          {dayAppts.length>0&&<span style={{backgroundColor:"#b8973e",color:"#fff",borderRadius:10,padding:"2px 8px",fontSize:11}}>{dayAppts.length}</span>}
+        </div>
+        {!showForm&&<button onClick={openNew} style={btnPrimary}>+ Agendar</button>}
+      </div>
+
+      {/* Formulario turno */}
+      {showForm&&(
+        <div style={{backgroundColor:"#faf9f6",borderRadius:12,padding:16,marginBottom:12,border:`1px solid ${editingId?"#b8973e":"#e2e8f0"}`}}>
+          <div style={{fontSize:12,fontWeight:700,color:editingId?"#b8973e":"#374151",marginBottom:12,textTransform:"uppercase"}}>
+            {editingId?"✏️ Editando turno":"Nuevo turno"}
           </div>
-        ))
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+            <div><label style={ls}>Fecha</label><input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={is}/></div>
+            <div><label style={ls}>Hora</label><input type="time" value={form.time} onChange={e=>setForm(f=>({...f,time:e.target.value}))} style={is}/></div>
+            <div><label style={ls}>Duración (min)</label>
+              <select value={form.duration} onChange={e=>setForm(f=>({...f,duration:e.target.value}))} style={{...is,padding:"9px 12px"}}>
+                {[15,30,45,60,90,120].map(d=><option key={d} value={d}>{d} min</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={ls}>Servicio</label>
+              <select value={form.serviceId} onChange={e=>{const s=services.find(x=>x.id===e.target.value);setForm(f=>({...f,serviceId:e.target.value,customService:s?.name||f.customService}));}} style={{...is,padding:"9px 12px"}}>
+                <option value="">— Seleccionar servicio —</option>
+                {services.map(s=><option key={s.id} value={s.id}>{s.name}{s.price?` ($${fmtARS(s.price)})`:""}</option>)}
+                <option value="__custom">Otro...</option>
+              </select>
+              {form.serviceId==="__custom"&&<input value={form.customService} onChange={e=>setForm(f=>({...f,customService:e.target.value}))} placeholder="Describí el servicio" style={{...is,marginTop:6}}/>}
+            </div>
+          </div>
+
+          {/* Cliente: existente o nuevo */}
+          <div style={{marginBottom:10}}>
+            <label style={ls}>Cliente</label>
+            <div style={{display:"flex",gap:6,marginBottom:8,marginTop:4}}>
+              <button onClick={()=>setForm(f=>({...f,clientMode:"existing"}))}
+                style={{flex:1,padding:"7px",borderRadius:8,border:`2px solid ${form.clientMode==="existing"?"#b8973e":"#e2e8f0"}`,backgroundColor:form.clientMode==="existing"?"#fdf8ee":"#fff",color:form.clientMode==="existing"?"#b8973e":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                👤 Ya registrada
+              </button>
+              <button onClick={()=>setForm(f=>({...f,clientMode:"new"}))}
+                style={{flex:1,padding:"7px",borderRadius:8,border:`2px solid ${form.clientMode==="new"?"#b8973e":"#e2e8f0"}`,backgroundColor:form.clientMode==="new"?"#fdf8ee":"#fff",color:form.clientMode==="new"?"#b8973e":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                ✨ Nueva clienta
+              </button>
+            </div>
+            {form.clientMode==="existing"?(
+              <select value={form.clientId} onChange={e=>setForm(f=>({...f,clientId:e.target.value}))} style={{...is,padding:"9px 12px"}}>
+                <option value="">— Seleccionar clienta —</option>
+                {clients.map(c=><option key={c.id} value={c.id}>{`${c.lastName||""}, ${c.firstName||""}`.trim()||"Sin nombre"}{c.phone?` · ${c.phone}`:""}</option>)}
+              </select>
+            ):(
+              <div style={{backgroundColor:"#fdf8ee",borderRadius:8,padding:12,border:"1px solid #e5d5a0"}}>
+                <div style={{fontSize:11,color:"#8a6d2f",fontWeight:600,marginBottom:8}}>Se creará como nueva clienta al guardar el turno</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <input value={form.newFirstName} onChange={e=>setForm(f=>({...f,newFirstName:e.target.value}))} placeholder="Nombre" style={{...is,padding:"8px 10px"}}/>
+                  <input value={form.newLastName} onChange={e=>setForm(f=>({...f,newLastName:e.target.value}))} placeholder="Apellido" style={{...is,padding:"8px 10px"}}/>
+                </div>
+                <input value={form.newPhone} onChange={e=>setForm(f=>({...f,newPhone:e.target.value}))} placeholder="Teléfono / WhatsApp" type="tel" style={{...is,padding:"8px 10px",marginTop:8}}/>
+              </div>
+            )}
+          </div>
+
+          <div style={{marginBottom:12}}>
+            <label style={ls}>Notas</label>
+            <input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder="Observaciones..." style={is}/>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>{setShowForm(false);setEditingId(null);}} style={btnSecondary}>Cancelar</button>
+            <button onClick={saveAppt}
+              disabled={form.clientMode==="existing"?!form.clientId:(!form.newFirstName.trim()&&!form.newLastName.trim())}
+              style={{...btnPrimary,flex:1,background:editingId?"linear-gradient(135deg,#d97706,#b45309)":undefined,
+                opacity:(form.clientMode==="existing"?!form.clientId:(!form.newFirstName.trim()&&!form.newLastName.trim()))?0.6:1}}>
+              {editingId?"✏️ Actualizar":"💾 Guardar turno"}
+            </button>
+          </div>
+        </div>
       )}
+
+      {loading&&<div style={{textAlign:"center",color:"#94a3b8",padding:16}}>Cargando...</div>}
+      {!loading&&dayAppts.length===0&&!showForm&&(
+        <div style={{padding:16,textAlign:"center",color:"#94a3b8",backgroundColor:"#faf9f6",borderRadius:10,border:"1px dashed #e2e8f0",fontSize:13}}>Sin turnos para este día</div>
+      )}
+      {dayAppts.map(a=>{
+        const cname=getClientName(a.clientId);const cphone=getClientPhone(a.clientId);
+        return(<div key={a.id} style={{backgroundColor:a.attendance==="attended"?"#f0fdf4":a.attendance==="absent"?"#fef2f2":"#fff",
+          borderRadius:10,padding:"12px 14px",marginBottom:8,
+          border:`1px solid ${a.attendance==="attended"?"#86efac":a.attendance==="absent"?"#fca5a5":"#e2e8f0"}`,
+          borderLeft:`4px solid ${a.attendance==="attended"?"#16a34a":a.attendance==="absent"?"#ef4444":"#b8973e"}`,
+          display:"flex",alignItems:"center",gap:10,transition:"all 0.2s"}}>
+          <div style={{backgroundColor:"#fdf8ee",borderRadius:8,padding:"7px 9px",textAlign:"center",flexShrink:0,minWidth:48,cursor:a.clientId?"pointer":"default"}}
+            onClick={()=>a.clientId&&onSelectClient(a.clientId)}>
+            <div style={{fontSize:14,fontWeight:800,color:"#b8973e"}}>{a.time}</div>
+            <div style={{fontSize:9,color:"#94a3b8"}}>{a.duration}min</div>
+          </div>
+          <div style={{flex:1,minWidth:0,cursor:a.clientId?"pointer":"default"}} onClick={()=>a.clientId&&onSelectClient(a.clientId)}>
+            <div style={{fontWeight:700,fontSize:13,color:"#1e293b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{cname}</div>
+            {(a.serviceName||a.customService)&&<div style={{fontSize:11,color:"#b8973e",marginTop:1,fontWeight:600}}>{a.serviceName||a.customService}</div>}
+            {a.notes&&<div style={{fontSize:11,color:"#64748b",marginTop:1}}>{a.notes}</div>}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+            <div style={{display:"flex",gap:3}}>
+              <button onClick={()=>toggleAttendance(a.id,"attended")} title="Asistió"
+                style={{width:26,height:26,borderRadius:6,border:`2px solid ${a.attendance==="attended"?"#16a34a":"#e2e8f0"}`,backgroundColor:a.attendance==="attended"?"#16a34a":"#fff",color:a.attendance==="attended"?"#fff":"#94a3b8",fontWeight:800,fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>✓</button>
+              <button onClick={()=>toggleAttendance(a.id,"absent")} title="No asistió"
+                style={{width:26,height:26,borderRadius:6,border:`2px solid ${a.attendance==="absent"?"#ef4444":"#e2e8f0"}`,backgroundColor:a.attendance==="absent"?"#ef4444":"#fff",color:a.attendance==="absent"?"#fff":"#94a3b8",fontWeight:800,fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+            </div>
+            {cphone&&<button onClick={()=>window.open(buildWAReminder(cphone,cname,a.date,a.time),"_blank")}
+              style={{padding:"3px 6px",borderRadius:6,border:"1px solid #25d366",backgroundColor:"#f0fdf4",color:"#16a34a",fontWeight:700,fontSize:10,cursor:"pointer"}}>📱</button>}
+            <div style={{display:"flex",gap:3}}>
+              <button onClick={()=>openEdit(a)} style={{flex:1,padding:"2px 5px",borderRadius:5,border:"1px solid #f59e0b",backgroundColor:"#fffbeb",color:"#d97706",fontWeight:700,fontSize:10,cursor:"pointer"}}>✏️</button>
+              <button onClick={()=>delAppt(a.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#94a3b8",fontSize:14}}>🗑</button>
+            </div>
+          </div>
+        </div>);
+      })}
     </div>
   );
 }
@@ -769,7 +959,7 @@ function ClientDetail({client,onChange,onBack,services}){
       </div>
       <div style={{flex:1,overflowY:"auto",padding:20}}>
         {tab==="ficha"&&<ClientForm client={client} onChange={onChange}/>}
-        {tab==="historial"&&<HistoryPanel client={client} onChange={onChange} services={services}/>}
+        {tab==="historial"&&<HistoryPanel client={client} onChange={onChange} services={services} onGoToCobros={()=>setTab("cobros")}/>}
         {tab==="cobros"&&<CobrosPanel client={client} onChange={onChange} services={services}/>}
       </div>
     </div>
@@ -953,7 +1143,7 @@ export default function DubaiApp(){
             selectedClientId&&sel?(
               <ClientDetail client={sel} onChange={handleClientChange} onBack={()=>setSelectedClientId(null)} services={services}/>
             ):(
-              view==="inicio"?<DashboardView clients={clients} onSelectClient={handleSelectClient} onNavigate={setView}/>:
+              view==="inicio"?<DashboardView clients={clients} onSelectClient={handleSelectClient} onNavigate={setView} services={services} onNewClient={({firstName,lastName,phone})=>{const c={id:Date.now().toString(),firstName,lastName,phone,email:"",instagram:"",notes:"",history:[],payments:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};setClients(prev=>[c,...prev]);sSet(`dubai_client:${c.id}`,c);return c;}}/>:
               view==="agenda"?<AgendaView clients={clients} onSelectClient={handleSelectClient}/>:
               view==="servicios"?<ServicesPanel services={services} onChange={handleServicesChange}/>:
               view==="estadisticas"?<StatsView clients={clients}/>:
